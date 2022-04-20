@@ -1,13 +1,13 @@
 use bracket_lib::prelude::*;
-use rand::prelude::IteratorRandom;
-use rand::seq::SliceRandom;
+use rand::distributions::WeightedIndex;
+use rand::prelude::{Distribution, IteratorRandom};
 use rand::thread_rng;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter; // etc.
 
 struct State {
     players: Vec<Player>,
-    map: [[Option<Player>; SCREEN_WIDTH as usize]; SCREEN_HEIGHT as usize],
+    map: Box<[[Option<Player>; SCREEN_WIDTH]; SCREEN_HEIGHT]>,
     frame_time: f32,
 }
 
@@ -18,22 +18,51 @@ impl GameState for State {
         if self.frame_time > FRAME_TIME {
             ctx.cls_bg(NAVY);
             self.frame_time = 0.0;
+            let mut x_y_before_move = vec![];
+
             self.players.iter_mut().for_each(|player| {
-                player.keep_moving(&mut self.map);
-                player.render(ctx, &self.map);
-                if player.meet_infected(&self.map) {
+                // Update map
+                player.update_position_in_map(&mut self.map);
+            });
+
+            /*
+            FIX STATE: State is a moment which be based on for next health-check
+             */
+            let fixed_map = self.map.clone();
+
+            self.players.iter_mut().for_each(|player| {
+                // Add player to screen
+                player.render(ctx);
+
+                /* Handle something BUT don't change any state. */
+                // Handle player health
+                if player.meet_infected(&fixed_map) {
                     if player.health_state == HealthState::Susceptible {
                         player.health_state = HealthState::Inflected;
                     }
                 }
+
+                // Deal with movement
+                if let Some(old_position) = player.keep_moving(&mut self.map) {
+                    x_y_before_move.push(old_position);
+                }
+
                 // println!("Step: {}", player.steps);
+            });
+
+            // Update map by deleting block that player have been gone.
+            x_y_before_move.iter().for_each(|p| {
+                self.map[p.1][p.0].take();
             });
         }
     }
 }
 
 impl State {
-    fn new(players: Vec<Player>, map: [[Option<Player>; SCREEN_WIDTH]; SCREEN_HEIGHT]) -> Self {
+    fn new(
+        players: Vec<Player>,
+        map: Box<[[Option<Player>; SCREEN_WIDTH]; SCREEN_HEIGHT]>,
+    ) -> Self {
         State {
             players,
             map,
@@ -89,35 +118,48 @@ impl Player {
     fn keep_moving(
         &mut self,
         map: &mut [[Option<Player>; SCREEN_WIDTH as usize]; SCREEN_HEIGHT as usize],
-    ) {
+    ) -> Option<(usize, usize)> {
         self.change_dir(map);
-        self.move_1_step(map);
+
+        if !self.end_way(map) {
+            /*
+            We should not remove player from old position because it has been left.
+            If we do that, successive player will recursively step in a empty position.
+             */
+            let ret = Some((self.x, self.y));
+            self.move_1_step();
+
+            /*
+            But we should put player in new position to prevent other player step into same position.
+            */
+            let _ = map[self.y][self.x].insert(self.clone()); //
+            return ret;
+        }
+
+        None
     }
 
     fn change_dir(
         &mut self,
-        map: &mut [[Option<Player>; SCREEN_WIDTH as usize]; SCREEN_HEIGHT as usize],
+        map: &[[Option<Player>; SCREEN_WIDTH as usize]; SCREEN_HEIGHT as usize],
     ) {
         let old_dir = self.dir;
         if self.is_lounging && self.steps > MIN_STEP {
             self.dir = Direction::iter().choose(&mut thread_rng()).unwrap();
+            if self.dir != old_dir {
+                self.steps = 0;
+            }
         } else if self.end_way(map) {
             self.dir = Direction::iter()
                 .filter(|x| x != &self.dir)
                 .choose(&mut thread_rng())
                 .unwrap();
-        } else {
-            return;
-        }
-
-        if self.is_lounging && self.steps > MIN_STEP && self.dir != old_dir {
-            self.steps = 0;
         }
     }
 
     fn end_way(
         &self,
-        map: &mut [[Option<Player>; SCREEN_WIDTH as usize]; SCREEN_HEIGHT as usize],
+        map: &[[Option<Player>; SCREEN_WIDTH as usize]; SCREEN_HEIGHT as usize],
     ) -> bool {
         match self.dir {
             Direction::Up => self.y == 0 || map[self.y - 1][self.x].is_some(),
@@ -147,13 +189,7 @@ impl Player {
         ret
     }
 
-    fn move_1_step(&mut self, map: &mut [[Option<Player>; SCREEN_WIDTH]; SCREEN_HEIGHT]) {
-        if self.end_way(map) {
-            return;
-        }
-
-        map[self.y][self.x].take();
-
+    fn move_1_step(&mut self) {
         match self.dir {
             Direction::Up => {
                 self.y = self.y.saturating_sub(1);
@@ -173,11 +209,13 @@ impl Player {
             }
         }
 
-        map[self.y][self.x].insert(self.clone());
-
         if self.is_lounging {
             self.steps += 1
         };
+    }
+
+    fn update_position_in_map(&self, map: &mut [[Option<Player>; SCREEN_WIDTH]; SCREEN_HEIGHT]) {
+        let _ = map[self.y][self.x].insert(self.clone());
     }
 
     fn meet_infected(
@@ -192,11 +230,7 @@ impl Player {
             > 0
     }
 
-    fn render(
-        &mut self,
-        ctx: &mut BTerm,
-        map: &[[Option<Player>; SCREEN_WIDTH as usize]; SCREEN_HEIGHT as usize],
-    ) {
+    fn render(&mut self, ctx: &mut BTerm) {
         // self.render_position(ctx, map);
 
         let mut fg = GREEN;
@@ -230,52 +264,38 @@ impl Player {
     }
 }
 
-struct Obstacle {
-    x: i32,     // where this obstacle put
-    gap_y: i32, // position in obstacle where has a gap
-    size: i32,  // size of gap
-}
-
-const SCREEN_HEIGHT: usize = 50;
-const SCREEN_WIDTH: usize = 90;
-const FRAME_TIME: f32 = 70.0;
+const SCREEN_HEIGHT: usize = 80;
+const SCREEN_WIDTH: usize = 100;
+const FRAME_TIME: f32 = 80.0;
 const SAFE_DISTANCE: usize = 10;
 
 fn main() -> BError {
     let mut random = RandomNumberGenerator::new();
+
+    // input
+    let (infected, immune, susceptible) = (1, 10, 10);
+    let peoples = 21;
+    let is_lounging = if random.range(0, 2) == 1 { true } else { false };
+
+    // begin
     let mut players = vec![];
+    let mut map: Box<[[Option<Player>; SCREEN_WIDTH]; SCREEN_HEIGHT]> =
+        Box::new([[None; SCREEN_WIDTH]; SCREEN_HEIGHT]);
 
-    let mut map: [[Option<Player>; SCREEN_WIDTH]; SCREEN_HEIGHT] =
-        [[None; SCREEN_WIDTH]; SCREEN_HEIGHT];
+    let mut count = 0;
 
-    (0..600).for_each(|i| {
+    (0..peoples).for_each(|i| {
         let x = random.range(0, SCREEN_WIDTH);
         let y = random.range(0, SCREEN_HEIGHT);
         let dir = Direction::iter().choose(&mut thread_rng()).unwrap();
-        let is_lounging = if random.range(0, 2) == 1 { true } else { false };
-        let health_state = HealthState::iter().choose(&mut thread_rng()).unwrap();
-
-        let player = Player::new(x, y, dir, true, HealthState::Susceptible);
-        players.push(player);
-        map[y][x].insert(player);
+        let health_state = generate_health_state(infected, immune, susceptible);
+        let player = Player::new(x, y, dir, is_lounging, health_state);
+        if map[y][x].is_none() {
+            players.push(player);
+            let _ = map[y][x].insert(player);
+            count += 1;
+        }
     });
-    let player = Player::new(0, 0, Direction::Right, true, HealthState::Inflected);
-
-    map[0][0].insert(player);
-    // players.push(Player::new(HealthState::Inflected));
-    // players.push(Player::new(HealthState::Immune));
-    // players.push(Player::new(HealthState::Immune));
-    // players.push(Player::new(HealthState::Susceptible));
-    // players.push(Player::new(HealthState::Susceptible));
-    // players.push(Player::new(
-    //     0,
-    //     1,
-    //     Direction::Right,
-    //     true,
-    //     HealthState::Inflected,
-    // ));
-
-    // let context = BTermBuilder::simple80x50().with_title("flappy").build()?;
 
     let context = BTermBuilder::new()
         .with_dimensions(SCREEN_WIDTH, SCREEN_HEIGHT)
@@ -284,5 +304,36 @@ fn main() -> BError {
         .with_font("terminal8x8.png", 8, 8)
         .with_simple_console(SCREEN_WIDTH, SCREEN_HEIGHT, "terminal8x8.png")
         .build()?;
+
     main_loop(context, State::new(players, map))
+}
+
+fn generate_health_state(inflected: u32, immune: u32, susceptible: u32) -> HealthState {
+    let items = [
+        (HealthState::Inflected, inflected),
+        (HealthState::Immune, immune),
+        (HealthState::Susceptible, susceptible),
+    ];
+    let dist2 = WeightedIndex::new(items.iter().map(|item| item.1)).unwrap();
+    items[dist2.sample(&mut thread_rng())].0
+}
+
+fn generate_health_state_sequence(
+    infected: u32,
+    immune: u32,
+    susceptible: u32,
+) -> impl Iterator<Item = HealthState> {
+    let mut v = vec![];
+
+    (0..infected).for_each(|_| {
+        v.push(HealthState::Inflected);
+    });
+    (0..immune).for_each(|_| {
+        v.push(HealthState::Immune);
+    });
+    (0..susceptible).for_each(|_| {
+        v.push(HealthState::Susceptible);
+    });
+
+    v.into_iter().cycle()
 }

@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use bracket_lib::prelude::*;
 use rand::distributions::WeightedIndex;
 use rand::prelude::{Distribution, IteratorRandom};
@@ -5,19 +7,65 @@ use rand::thread_rng;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter; // etc.
 
+#[derive(Default)]
+struct Statistic {
+    inflected: u32,
+    immune: u32,
+    susceptible: u32,
+}
+impl Statistic {
+    fn total(&self) -> u32 {
+        self.inflected + self.immune + self.susceptible
+    }
+}
+
+impl Display for Statistic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Inflected: {}\n
+            Immune: {}\n
+            Susceptible: {}\n",
+            self.inflected, self.immune, self.susceptible
+        )
+    }
+}
+
+impl Statistic {}
 struct State {
     players: Vec<Player>,
     map: Box<[[Option<Player>; SCREEN_WIDTH]; SCREEN_HEIGHT]>,
     frame_time: f32,
+    init_fn: Box<
+        dyn Fn() -> (
+            Vec<Player>,
+            Box<[[Option<Player>; SCREEN_WIDTH]; SCREEN_HEIGHT]>,
+            Statistic,
+        ),
+    >,
+    statistic: Statistic,
 }
 
 impl GameState for State {
     fn tick(&mut self, ctx: &mut BTerm) {
         self.frame_time += ctx.frame_time_ms;
 
+        ctx.cls_bg(NAVY);
+
+        self.show_info(ctx);
+
+        self.players.iter_mut().for_each(|player| {
+            // Add player to screen
+            player.render(ctx);
+        });
+
+        if let Some(VirtualKeyCode::R) = ctx.key {
+            self.restart();
+        }
+
         if self.frame_time > FRAME_TIME {
-            ctx.cls_bg(NAVY);
-            self.frame_time = 0.0;
+            self.frame_time = 0.0; // reset
+
             let mut x_y_before_move = vec![];
 
             self.players.iter_mut().for_each(|player| {
@@ -31,14 +79,13 @@ impl GameState for State {
             let fixed_map = self.map.clone();
 
             self.players.iter_mut().for_each(|player| {
-                // Add player to screen
-                player.render(ctx);
-
                 /* Handle something BUT don't change any state. */
                 // Handle player health
                 if player.meet_infected(&fixed_map) {
                     if player.health_state == HealthState::Susceptible {
                         player.health_state = HealthState::Inflected;
+                        self.statistic.inflected += 1;
+                        self.statistic.susceptible -= 1;
                     }
                 }
 
@@ -62,12 +109,64 @@ impl State {
     fn new(
         players: Vec<Player>,
         map: Box<[[Option<Player>; SCREEN_WIDTH]; SCREEN_HEIGHT]>,
+        init_fn: Box<
+            dyn Fn() -> (
+                Vec<Player>,
+                Box<[[Option<Player>; SCREEN_WIDTH]; SCREEN_HEIGHT]>,
+                Statistic,
+            ),
+        >,
+        statistic: Statistic,
     ) -> Self {
         State {
             players,
             map,
             frame_time: 0.0,
+            init_fn,
+            statistic,
         }
+    }
+
+    fn restart(&mut self) {
+        let (players, map, statistic) = (self.init_fn)();
+        self.players = players;
+        self.map = map;
+        self.statistic = statistic;
+    }
+
+    fn show_info(&self, ctx: &mut BTerm) {
+        ctx.print(0, 0, "Press R to restart.");
+        ctx.print_color(
+            0,
+            1,
+            RED,
+            BLACK,
+            format!("   Infected: {}", &self.statistic.inflected),
+        );
+        ctx.print_color(
+            0,
+            2,
+            GREEN,
+            BLACK,
+            format!("     Immune: {}", &self.statistic.immune),
+        );
+        ctx.print_color(
+            0,
+            3,
+            YELLOW,
+            BLACK,
+            format!("Susceptible: {}", &self.statistic.susceptible),
+        );
+        ctx.print(0, 4, format!("      Total: {}", &self.statistic.total()));
+        ctx.set_fancy(
+            PointF { x: 0.0, y: 5.0 },
+            0,
+            Radians::new(0.0),
+            PointF { x: 2.0, y: 2.0 },
+            YELLOW,
+            BLACK,
+            to_cp437('@'),
+        )
     }
 }
 
@@ -264,18 +363,46 @@ impl Player {
     }
 }
 
-const SCREEN_HEIGHT: usize = 80;
+const SCREEN_HEIGHT: usize = 70;
 const SCREEN_WIDTH: usize = 100;
 const FRAME_TIME: f32 = 80.0;
-const SAFE_DISTANCE: usize = 10;
+const SAFE_DISTANCE: usize = 5;
 
 fn main() -> BError {
     let mut random = RandomNumberGenerator::new();
-
     // input
     let (infected, immune, susceptible) = (1, 10, 10);
     let peoples = 21;
+
+    let init_fn = Box::new(move || generate(peoples, infected, immune, susceptible));
+
+    let (players, map, s) = init_fn();
+
+    let context = BTermBuilder::new()
+        .with_dimensions(SCREEN_WIDTH, SCREEN_HEIGHT)
+        .with_tile_dimensions(8, 8)
+        .with_title("Virus")
+        .with_font("terminal8x8.png", 8, 8)
+        .with_simple_console(SCREEN_WIDTH, SCREEN_HEIGHT, "terminal8x8.png")
+        .build()?;
+
+    main_loop(context, State::new(players, map, init_fn, s))
+}
+
+fn generate(
+    peoples: u32,
+    infected: u32,
+    immune: u32,
+    susceptible: u32,
+) -> (
+    Vec<Player>,
+    Box<[[Option<Player>; SCREEN_WIDTH]; SCREEN_HEIGHT]>,
+    Statistic,
+) {
+    let mut random = RandomNumberGenerator::new();
     let is_lounging = if random.range(0, 2) == 1 { true } else { false };
+
+    let mut statistic = Statistic::default();
 
     // begin
     let mut players = vec![];
@@ -294,18 +421,15 @@ fn main() -> BError {
             players.push(player);
             let _ = map[y][x].insert(player);
             count += 1;
+            match health_state {
+                HealthState::Inflected => statistic.inflected += 1,
+                HealthState::Immune => statistic.immune += 1,
+                HealthState::Susceptible => statistic.susceptible += 1,
+            }
         }
     });
 
-    let context = BTermBuilder::new()
-        .with_dimensions(SCREEN_WIDTH, SCREEN_HEIGHT)
-        .with_tile_dimensions(8, 8)
-        .with_title("Virus")
-        .with_font("terminal8x8.png", 8, 8)
-        .with_simple_console(SCREEN_WIDTH, SCREEN_HEIGHT, "terminal8x8.png")
-        .build()?;
-
-    main_loop(context, State::new(players, map))
+    (players, map, statistic)
 }
 
 fn generate_health_state(inflected: u32, immune: u32, susceptible: u32) -> HealthState {

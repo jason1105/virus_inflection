@@ -1,0 +1,13 @@
+[package]
+name = "virus_inflection"
+version = "0.1.0"
+authors = ["lvwei <lvw1105@gmail.com>"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bracket-lib = "~0.8.1"
+strum = "0.24.0"
+strum_macros = "0.24.0"
+rand = "0.8.5"

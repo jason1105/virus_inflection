@@ -371,8 +371,8 @@ const SAFE_DISTANCE: usize = 5;
 fn main() -> BError {
     let mut random = RandomNumberGenerator::new();
     // input
-    let (infected, immune, susceptible) = (1, 10, 10);
-    let peoples = 21;
+    let (infected, immune, susceptible) = (1, 300, 400);
+    let peoples = 1000;
 
     let init_fn = Box::new(move || generate(peoples, infected, immune, susceptible));
 
